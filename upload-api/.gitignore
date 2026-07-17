@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+.venv/
+
+# Uploaded audio
+storage/ready/*
+!storage/ready/.gitkeep
+
+# Generated metadata
+storage/metadata/*
+!storage/metadata/.gitkeep
+
+# Temporary uploads
+*.part
+
+# Environment files
+.env
+
+# Editor files
+.vscode/
+.idea/
+.DS_Store

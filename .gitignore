@@ -1,28 +1,30 @@
-# Python
-__pycache__/
-*.pyc
+# Python environments
 .venv/
-.env
+**/.venv/
+__pycache__/
+*.py[cod]
 
-# C++
-build/
-*.o
-*.out
+# CMake and C++ generated output
+stream-server/build/
+**/build/
+*.exe
+*.obj
+*.pdb
+*.ilk
 
-# Audio storage
-storage/uploads/*
-storage/processing/*
-storage/ready/*
+# Test audio
+upload-api/sample.mp3
 
-# Keep directories
-!storage/uploads/.gitkeep
-!storage/processing/.gitkeep
-!storage/ready/.gitkeep
+# Generated audio and metadata
+upload-api/storage/ready/*
+!upload-api/storage/ready/.gitkeep
 
-# IDE
-.vscode/
-.idea/
+upload-api/storage/metadata/*
+!upload-api/storage/metadata/.gitkeep
 
-# OS
-.DS_Store
-Thumbs.db
+# Temporary files
+*.part
+*.bin
+*-headers.txt
+downloaded.mp3
+full-download.mp3
