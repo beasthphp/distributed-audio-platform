@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# C++
+build/
+*.o
+*.out
+
+# Audio storage
+storage/uploads/*
+storage/processing/*
+storage/ready/*
+
+# Keep directories
+!storage/uploads/.gitkeep
+!storage/processing/.gitkeep
+!storage/ready/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
