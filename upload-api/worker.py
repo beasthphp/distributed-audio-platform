@@ -2,7 +2,7 @@ import argparse
 import json
 import logging
 import os
-import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,8 @@ METADATA_DIRECTORY = STORAGE_DIRECTORY / "metadata"
 READY_DIRECTORY = STORAGE_DIRECTORY / "ready"
 
 POLL_INTERVAL_SECONDS = 2
+FFPROBE_TIMEOUT_SECONDS = 30
+FFMPEG_TIMEOUT_SECONDS = 300
 
 
 logging.basicConfig(
@@ -24,8 +26,12 @@ logging.basicConfig(
 )
 
 
+class AudioProcessingError(Exception):
+    """Raised when FFprobe or FFmpeg cannot process an audio file."""
+
+
 def read_metadata(metadata_path: Path) -> dict[str, Any] | None:
-    """Read and validate a metadata JSON file."""
+    """Read a metadata JSON file."""
 
     try:
         metadata = json.loads(
@@ -64,8 +70,106 @@ def write_metadata(
     os.replace(temporary_path, metadata_path)
 
 
+def validate_audio(source_path: Path) -> None:
+    """Use FFprobe to confirm that the input contains audio."""
+
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=codec_name",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(source_path),
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=FFPROBE_TIMEOUT_SECONDS,
+        check=False,
+    )
+
+    codec_name = result.stdout.strip()
+
+    if result.returncode != 0 or not codec_name:
+        error_message = result.stderr.strip()
+
+        if not error_message:
+            error_message = "No valid audio stream was found."
+
+        raise AudioProcessingError(
+            f"FFprobe validation failed: {error_message}"
+        )
+
+    logging.info(
+        "FFprobe detected codec '%s' in %s",
+        codec_name,
+        source_path.name,
+    )
+
+
+def transcode_audio(
+    source_path: Path,
+    temporary_ready_path: Path,
+) -> None:
+    """Convert the source audio into a 128 kbps MP3."""
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source_path),
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-codec:a",
+        "libmp3lame",
+        "-b:a",
+        "128k",
+        "-f",
+        "mp3",
+        str(temporary_ready_path),
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=FFMPEG_TIMEOUT_SECONDS,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        error_message = result.stderr.strip()
+
+        if not error_message:
+            error_message = "FFmpeg returned a non-zero exit code."
+
+        raise AudioProcessingError(
+            f"FFmpeg processing failed: {error_message}"
+        )
+
+    if not temporary_ready_path.is_file():
+        raise AudioProcessingError(
+            "FFmpeg completed without creating an output file."
+        )
+
+    if temporary_ready_path.stat().st_size == 0:
+        raise AudioProcessingError(
+            "FFmpeg created an empty output file."
+        )
+
+
 def process_job(metadata_path: Path) -> bool:
-    """Process one queued audio job."""
+    """Validate and transcode one queued audio job."""
 
     metadata = read_metadata(metadata_path)
 
@@ -101,13 +205,15 @@ def process_job(metadata_path: Path) -> bool:
 
     try:
         if not source_path.is_file():
-            raise FileNotFoundError(
-                f"Uploaded audio does not exist: {source_path}"
+            raise AudioProcessingError(
+                "The uploaded source file does not exist."
             )
 
-        shutil.copyfile(
-            source_path,
-            temporary_ready_path,
+        validate_audio(source_path)
+
+        transcode_audio(
+            source_path=source_path,
+            temporary_ready_path=temporary_ready_path,
         )
 
         os.replace(
@@ -115,18 +221,23 @@ def process_job(metadata_path: Path) -> bool:
             ready_path,
         )
 
-    except (OSError, shutil.Error):
+    except (
+        AudioProcessingError,
+        OSError,
+        subprocess.SubprocessError,
+    ) as error:
         temporary_ready_path.unlink(missing_ok=True)
         ready_path.unlink(missing_ok=True)
 
         metadata["status"] = "failed"
-        metadata["error"] = "Worker could not copy the uploaded audio."
+        metadata["error"] = str(error)
 
         write_metadata(metadata_path, metadata)
 
-        logging.exception(
-            "Audio job %s failed",
+        logging.error(
+            "Audio job %s failed: %s",
             audio_id,
+            error,
         )
 
         return True
@@ -162,7 +273,7 @@ def run_worker() -> None:
     METADATA_DIRECTORY.mkdir(parents=True, exist_ok=True)
     READY_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
-    logging.info("Audio worker started")
+    logging.info("Audio processing worker started")
     logging.info(
         "Checking for queued jobs every %s seconds",
         POLL_INTERVAL_SECONDS,
@@ -177,7 +288,7 @@ def run_worker() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Process queued audio uploads."
+        description="Validate and process queued audio uploads."
     )
 
     parser.add_argument(
@@ -200,7 +311,7 @@ def main() -> None:
     try:
         run_worker()
     except KeyboardInterrupt:
-        logging.info("Audio worker stopped")
+        logging.info("Audio processing worker stopped")
 
 
 if __name__ == "__main__":
