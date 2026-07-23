@@ -1,6 +1,6 @@
 import json
-from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
@@ -9,18 +9,20 @@ from pydantic import BaseModel, ValidationError
 
 app = FastAPI(
     title="Distributed Audio Upload API",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STORAGE_DIRECTORY = BASE_DIR / "storage"
 
-AUDIO_DIRECTORY = STORAGE_DIRECTORY / "ready"
+UPLOADS_DIRECTORY = STORAGE_DIRECTORY / "uploads"
 METADATA_DIRECTORY = STORAGE_DIRECTORY / "metadata"
+READY_DIRECTORY = STORAGE_DIRECTORY / "ready"
 
-AUDIO_DIRECTORY.mkdir(parents=True, exist_ok=True)
+UPLOADS_DIRECTORY.mkdir(parents=True, exist_ok=True)
 METADATA_DIRECTORY.mkdir(parents=True, exist_ok=True)
+READY_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
 
 MAX_FILE_SIZE = 50 * 1024 * 1024
@@ -28,14 +30,33 @@ CHUNK_SIZE = 1024 * 1024
 
 
 class AudioMetadata(BaseModel):
-    """Metadata stored for every successfully uploaded audio file."""
+    """Metadata stored for each uploaded audio file."""
 
     audio_id: str
     filename: str
     size_bytes: int
-    status: str
-    created_at: datetime
-    stream_url: str
+    status: Literal["queued", "processing", "ready", "failed"]
+    error: str | None = None
+
+
+def cleanup_failed_upload(
+    upload_directory: Path,
+    temporary_audio_path: Path,
+    audio_path: Path,
+    temporary_metadata_path: Path,
+    metadata_path: Path,
+) -> None:
+    """Remove files created during an unsuccessful upload."""
+
+    temporary_audio_path.unlink(missing_ok=True)
+    audio_path.unlink(missing_ok=True)
+    temporary_metadata_path.unlink(missing_ok=True)
+    metadata_path.unlink(missing_ok=True)
+
+    try:
+        upload_directory.rmdir()
+    except OSError:
+        pass
 
 
 @app.get("/health")
@@ -54,7 +75,7 @@ async def health_check() -> dict[str, str]:
 async def upload_audio(
     file: UploadFile = File(...),
 ) -> AudioMetadata:
-    """Validate an MP3, store it, and persist its metadata."""
+    """Validate an MP3, store the original file, and queue it."""
 
     original_filename = file.filename or "unknown"
     extension = Path(original_filename).suffix.lower()
@@ -69,8 +90,10 @@ async def upload_audio(
 
     audio_id = str(uuid4())
 
-    audio_destination = AUDIO_DIRECTORY / f"{audio_id}.mp3"
-    temporary_audio_destination = AUDIO_DIRECTORY / f"{audio_id}.part"
+    upload_directory = UPLOADS_DIRECTORY / audio_id
+
+    audio_destination = upload_directory / "original.mp3"
+    temporary_audio_destination = upload_directory / "original.mp3.part"
 
     metadata_destination = METADATA_DIRECTORY / f"{audio_id}.json"
     temporary_metadata_destination = (
@@ -80,7 +103,10 @@ async def upload_audio(
     total_bytes = 0
 
     try:
-        # Save the uploaded audio incrementally.
+        upload_directory.mkdir(parents=True, exist_ok=False)
+
+        # Save the upload in chunks instead of loading the entire file
+        # into memory.
         with temporary_audio_destination.open("wb") as output_file:
             while chunk := await file.read(CHUNK_SIZE):
                 total_bytes += len(chunk)
@@ -93,19 +119,19 @@ async def upload_audio(
 
                 output_file.write(chunk)
 
-        # The audio becomes ready only after the complete upload succeeds.
+        # Rename only after the complete upload succeeds.
         temporary_audio_destination.replace(audio_destination)
 
         metadata = AudioMetadata(
             audio_id=audio_id,
             filename=original_filename,
             size_bytes=total_bytes,
-            status="ready",
-            created_at=datetime.now(timezone.utc),
-            stream_url=f"/api/v1/audio/{audio_id}/stream",
+            status="queued",
+            error=None,
         )
 
-        # Save metadata using another temporary file.
+        # Write metadata through a temporary file to avoid partially
+        # written JSON.
         temporary_metadata_destination.write_text(
             metadata.model_dump_json(indent=2),
             encoding="utf-8",
@@ -114,17 +140,23 @@ async def upload_audio(
         temporary_metadata_destination.replace(metadata_destination)
 
     except HTTPException:
-        temporary_audio_destination.unlink(missing_ok=True)
-        temporary_metadata_destination.unlink(missing_ok=True)
-        audio_destination.unlink(missing_ok=True)
-        metadata_destination.unlink(missing_ok=True)
+        cleanup_failed_upload(
+            upload_directory=upload_directory,
+            temporary_audio_path=temporary_audio_destination,
+            audio_path=audio_destination,
+            temporary_metadata_path=temporary_metadata_destination,
+            metadata_path=metadata_destination,
+        )
         raise
 
     except OSError as error:
-        temporary_audio_destination.unlink(missing_ok=True)
-        temporary_metadata_destination.unlink(missing_ok=True)
-        audio_destination.unlink(missing_ok=True)
-        metadata_destination.unlink(missing_ok=True)
+        cleanup_failed_upload(
+            upload_directory=upload_directory,
+            temporary_audio_path=temporary_audio_destination,
+            audio_path=audio_destination,
+            temporary_metadata_path=temporary_metadata_destination,
+            metadata_path=metadata_destination,
+        )
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -142,7 +174,7 @@ async def upload_audio(
     response_model=AudioMetadata,
 )
 def get_audio_metadata(audio_id: str) -> AudioMetadata:
-    """Retrieve metadata for an uploaded audio file."""
+    """Retrieve the current processing status of an audio file."""
 
     try:
         normalized_audio_id = str(UUID(audio_id))
@@ -152,13 +184,12 @@ def get_audio_metadata(audio_id: str) -> AudioMetadata:
             detail="The audio ID is not a valid UUID.",
         ) from error
 
-    audio_path = AUDIO_DIRECTORY / f"{normalized_audio_id}.mp3"
     metadata_path = METADATA_DIRECTORY / f"{normalized_audio_id}.json"
 
-    if not audio_path.is_file() or not metadata_path.is_file():
+    if not metadata_path.is_file():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Audio file was not found.",
+            detail="Audio metadata was not found.",
         )
 
     try:

@@ -28,3 +28,7 @@ upload-api/storage/metadata/*
 *-headers.txt
 downloaded.mp3
 full-download.mp3
+
+# Uploaded source audio
+upload-api/storage/uploads/*
+!upload-api/storage/uploads/.gitkeep
