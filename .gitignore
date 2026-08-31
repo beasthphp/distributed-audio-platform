@@ -1,4 +1,4 @@
-# Python environments
+# Python environments and caches
 .venv/
 **/.venv/
 __pycache__/
@@ -12,23 +12,28 @@ stream-server/build/
 *.pdb
 *.ilk
 
-# Test audio
+# Local test audio
 upload-api/sample.mp3
+downloaded.mp3
+full-download.mp3
 
-# Generated audio and metadata
+# Generated ready audio
 upload-api/storage/ready/*
 !upload-api/storage/ready/.gitkeep
 
+# Generated job metadata
 upload-api/storage/metadata/*
 !upload-api/storage/metadata/.gitkeep
-
-# Temporary files
-*.part
-*.bin
-*-headers.txt
-downloaded.mp3
-full-download.mp3
 
 # Uploaded source audio
 upload-api/storage/uploads/*
 !upload-api/storage/uploads/.gitkeep
+
+# Temporary transfer/processing artifacts
+*.part
+*.bin
+*-headers.txt
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
